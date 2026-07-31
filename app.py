@@ -21,30 +21,50 @@ app = Flask(__name__)
 configuration = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip())
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"].strip())
 
-DIFY_API_KEY = os.environ["DIFY_API_KEY"]
-DIFY_API_URL = os.environ.get("DIFY_API_URL", "https://api.dify.ai/v1")
+DIFY_API_KEY = os.environ["DIFY_API_KEY"].strip()
+DIFY_API_URL = os.environ.get("DIFY_API_URL", "https://api.dify.ai/v1").strip()
 
-# ユーザーごとの会話IDを保存（簡易実装：サーバー再起動でリセット）
-conversation_ids = {}
+# ステップ番号 → 質問テキスト
+QUESTIONS = {
+    1: "起床時間を教えてください。\n例：7:00",
+    2: "就寝時間を教えてください。\n例：23:00",
+    3: "固定予定を教えてください。\nなければ「なし」と入力してください",
+    4: "今日やるタスクを教えてください",
+    5: "最優先のタスクを教えてください",
+}
+
+# ステップ番号 → Dify inputsのキー名
+STEP_KEYS = {
+    1: "wake_time",
+    2: "sleep_time",
+    3: "fixed_schedule",
+    4: "tasks",
+    5: "top_priority",
+}
+
+# ユーザーごとの会話状態を保存（サーバー再起動でリセット）
+# { user_id: { "step": int, "answers": { key: value } } }
+user_states = {}
 
 
-def ask_dify(user_id: str, message: str) -> str:
-    """DifyのChat APIにメッセージを送り、返答テキストを返す"""
+def ask_dify(user_id: str, answers: dict) -> str:
+    """5項目が揃ったらDify APIを呼び出してスケジュールを生成する"""
     headers = {
         "Authorization": f"Bearer {DIFY_API_KEY}",
         "Content-Type": "application/json",
     }
-
     payload = {
-        "inputs": {},
-        "query": message,
-        "response_mode": "blocking",  # 同期モード
+        "inputs": {
+            "wake_time": answers["wake_time"],
+            "sleep_time": answers["sleep_time"],
+            "fixed_schedule": answers["fixed_schedule"],
+            "tasks": answers["tasks"],
+            "top_priority": answers["top_priority"],
+        },
+        "query": "今日のスケジュールを作成してください",
+        "response_mode": "blocking",
         "user": user_id,
     }
-
-    # 同じユーザーの会話を継続する
-    if user_id in conversation_ids:
-        payload["conversation_id"] = conversation_ids[user_id]
 
     try:
         response = requests.post(
@@ -54,20 +74,49 @@ def ask_dify(user_id: str, message: str) -> str:
             timeout=30,
         )
         response.raise_for_status()
-        data = response.json()
-
-        # 会話IDを保存して次回も同じ会話を継続
-        conversation_ids[user_id] = data.get("conversation_id", "")
-
-        return data.get("answer", "返答を取得できませんでした。")
+        return response.json().get("answer", "返答を取得できませんでした。")
 
     except requests.exceptions.Timeout:
         return "タイムアウトしました。もう一度お試しください。"
     except requests.exceptions.RequestException as e:
         print(f"Dify APIエラー: {e}")
-        if hasattr(e, 'response') and e.response is not None:
+        if hasattr(e, "response") and e.response is not None:
             print(f"Dify レスポンス詳細: {e.response.text}")
         return "エラーが発生しました。しばらく後でお試しください。"
+
+
+def handle_conversation(user_id: str, message: str) -> str:
+    """ユーザーの会話状態を管理し、次に返すテキストを返す"""
+
+    # リセットコマンドは常に最優先で処理
+    if message.strip() == "リセット":
+        user_states[user_id] = {"step": 1, "answers": {}}
+        return "リセットしました。最初からやり直します。\n\n" + QUESTIONS[1]
+
+    state = user_states.get(user_id)
+
+    # 状態がない場合は最初の質問から開始
+    if state is None:
+        user_states[user_id] = {"step": 1, "answers": {}}
+        return QUESTIONS[1]
+
+    step = state["step"]
+
+    # 現在のステップの回答を保存
+    state["answers"][STEP_KEYS[step]] = message.strip()
+
+    next_step = step + 1
+
+    # まだ質問が残っている場合は次の質問を返す
+    if next_step <= 5:
+        state["step"] = next_step
+        return QUESTIONS[next_step]
+
+    # 5項目すべて揃った → Dify APIを呼び出す
+    answers = state["answers"].copy()
+    del user_states[user_id]  # Dify呼び出し前に状態をリセット
+    print(f"Dify呼び出し: user={user_id}, inputs={answers}")
+    return ask_dify(user_id, answers)
 
 
 @app.route("/callback", methods=["POST"])
@@ -76,15 +125,10 @@ def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
-    # デバッグ用ログ（問題解決後に削除）
-    print(f"[DEBUG] signature: {signature[:20]}...")
-    print(f"[DEBUG] body: {body[:200]}")
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError as e:
         print(f"[ERROR] 署名検証失敗: {e}")
-        print(f"[ERROR] Channel Secret 先頭8文字: {os.environ.get('LINE_CHANNEL_SECRET', '')[:8]}")
         abort(400)
 
     return "OK"
@@ -92,18 +136,14 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    """テキストメッセージを受け取り、Difyで処理して返信する"""
+    """テキストメッセージを受け取り、会話状態に応じて返信する"""
     user_id = event.source.user_id
     user_message = event.message.text
 
     print(f"受信: user={user_id}, message={user_message}")
 
-    # Difyに問い合わせ
-    reply_text = ask_dify(user_id, user_message)
+    reply_text = handle_conversation(user_id, user_message)
 
-    print(f"返信: {reply_text}")
-
-    # LINEへ返信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
