@@ -65,6 +65,8 @@ def ask_dify(user_id: str, message: str) -> str:
         return "タイムアウトしました。もう一度お試しください。"
     except requests.exceptions.RequestException as e:
         print(f"Dify APIエラー: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Dify レスポンス詳細: {e.response.text}")
         return "エラーが発生しました。しばらく後でお試しください。"
 
 
