@@ -17,9 +17,9 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# LINE APIの設定
-configuration = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"])
-handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
+# LINE APIの設定（strip()で前後の空白・改行を除去）
+configuration = Configuration(access_token=os.environ["LINE_CHANNEL_ACCESS_TOKEN"].strip())
+handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"].strip())
 
 DIFY_API_KEY = os.environ["DIFY_API_KEY"]
 DIFY_API_URL = os.environ.get("DIFY_API_URL", "https://api.dify.ai/v1")
