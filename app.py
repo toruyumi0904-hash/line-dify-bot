@@ -71,12 +71,18 @@ def ask_dify(user_id: str, message: str) -> str:
 @app.route("/callback", methods=["POST"])
 def callback():
     """LINEからのWebhookを受け取るエンドポイント"""
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
+    # デバッグ用ログ（問題解決後に削除）
+    print(f"[DEBUG] signature: {signature[:20]}...")
+    print(f"[DEBUG] body: {body[:200]}")
 
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except InvalidSignatureError as e:
+        print(f"[ERROR] 署名検証失敗: {e}")
+        print(f"[ERROR] Channel Secret 先頭8文字: {os.environ.get('LINE_CHANNEL_SECRET', '')[:8]}")
         abort(400)
 
     return "OK"
